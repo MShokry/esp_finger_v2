@@ -11,7 +11,7 @@
 #include <FPM.h>
 
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
+#include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager
 //#include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 
@@ -31,6 +31,7 @@
   #define PRINTDEBUG(STR) /*NOTHING*/
 #endif
 
+#define VER "2.1"
 
 /*************************************************************************************
  *  //Relay and outputs HW DEB
@@ -45,6 +46,32 @@ uint32_t previousMillis = 0;        // will store last time LED was updated
 const unsigned long interval = 5000;     // interval at which open relay (milliseconds)
 const unsigned long fing_interval = 60000;     // interval at which waiting the finger print (milliseconds)
 bool unlocked=false;
+
+
+
+#define API "?name="
+// WIFI Configuration
+char update_server[30] = "7elol.com";
+char update_server_page[30] = "/update/finger.php";
+char server[30] = "7elol.com";
+char server_page[30] = "/update/rfid.php";
+char server_port[6] = "80";
+char PLACE[20] = "Nest1";
+//default custom static IP
+char static_ip[16] = "192.168.0.10";
+char static_gw[16] = "192.168.0.1";
+char static_sn[16] = "255.255.255.0";
+
+char SSID[24] = "finger";
+char SSID_pwd[24] = "";
+//flag for saving data
+bool shouldSaveConfig = false;
+
+//callback notifying us of the need to save config
+void saveConfigCallback () {
+  PRINTDEBUGLN("Should save config");
+  shouldSaveConfig = true;
+}
 
 // Search the DB for a print with this example
 #define TEMPLATES_PER_PAGE  256
@@ -68,6 +95,11 @@ void resetSelf() {
   while(1);
 }
 //Buzzing
+
+int getFingerprintEnroll(int id);
+void enroll();
+int deleteFingerprint(int id);
+
 void buzzing(int times=2,int delayh = 200,int delayl = 100){
   for(int i=0;i<times;i++){
     digitalWrite(BUZZER, HIGH);         // Turns Buzzer ON
@@ -78,7 +110,7 @@ void buzzing(int times=2,int delayh = 200,int delayl = 100){
 }
 //Updating ESP From Internet
 void update(){
-t_httpUpdate_return ret = ESPhttpUpdate.update("http://7elol.com/update/finger.php", "2");
+t_httpUpdate_return ret = ESPhttpUpdate.update(String(update_server)+String(update_server_page), String(VER));
 switch(ret) {
     case HTTP_UPDATE_FAILED:
         #if (DEBUG==1)
@@ -96,168 +128,95 @@ switch(ret) {
   }
 }
 
-/*************************************************************************************
- *  Wifi Control and  Connection
- *************************************************************************************/
-//WiFi
-char ap1[22] = "ebda3.com";
-char ap1_pwd[22] = "#$7elol(TOY)";
-char ap2[22] = "7elolcom";
-char ap2_pwd[22] = "#$7elol(R)";
-char ap3[22] = "ebda3-eg.com";
-char ap3_pwd[22] = "#$ebda3(R)";
-char ap4[22] = "ebda3 egypt";
-char ap4_pwd[22] = "qweasdzxc1234";
-const char* AP_ssid = "7elol.Lock"; // The name of the Wi-Fi network that will be created
-const char* AP_password = "#$Lock()";   // The password required to connect to it, leave 
-#define AP 1
-#define STA 0
-bool WIFI_Status = AP;
-ESP8266WiFiMulti wifiMulti;
 
-/*************************************************************************************
- *  Function to connect WiFi 
- *************************************************************************************/
-void connectWifimul(){
-  int WiFiCounter = 0; 
-  if(WIFI_Status == STA){ //Set as STA
-      wifiMulti.addAP(ap1, ap1_pwd);
-      wifiMulti.addAP(ap2, ap2_pwd);
-      wifiMulti.addAP(ap3, ap3_pwd);
-      wifiMulti.addAP(ap4, ap4_pwd);
-      while(wifiMulti.run() != WL_CONNECTED && WiFiCounter < 30) {
-        delay(1000);
-        WiFiCounter++;
-        #if (DEBUG==1)
-          Serial.print(".");
-        #endif 
-      }
-      //PRINTDEBUG();
-      PRINTDEBUG("WiFi connected");
-      PRINTDEBUG("IP address:");
-      PRINTDEBUG(WiFi.localIP());
-  }else{ // SEt as AP
-    WiFi.softAP(AP_ssid, AP_password);             // Start the access point
-    PRINTDEBUG("Access Point:");
-    PRINTDEBUG(AP_ssid);
-    PRINTDEBUG("started");
-  
-    PRINTDEBUG("IP address:\t");
-    PRINTDEBUG(WiFi.softAPIP());         // Send the IP address of the ESP8266 to the 
-  }
-}
 
 /*************************************************************************************
  *  API and Server
  *************************************************************************************/
-char PLACE[20] = "FINGER1";
-char host[50] = "192.168.1.50";
-unsigned int httpsPort = 80; //443
-#define API "/lock.php?place="
 //#define API "/request_service-edit-1.html?json=true&ajax_page=true&place="
-ESP8266WebServer server(80); //Web Server
+ESP8266WebServer webServer(80); //Web Server
 
 /**************************************************************************************
  *  Loading Configurations from json files
  **************************************************************************************/
+
 bool load_wifi(){
-  File configFile = SPIFFS.open("/config.json", "r");
-  if (!configFile) {
-    PRINTDEBUG("Failed to open config file");
-    WIFI_Status = AP;
-    WiFi.mode(WIFI_AP);
-    return false;
-  }
-  size_t size = configFile.size();
-  if (size > 1024) {
-    PRINTDEBUG("Config file size is too large");
-    return false;
-  }
-  // Allocate a buffer to store contents of the file.
-  std::unique_ptr<char[]> buf(new char[size]);
-  String s=configFile.readStringUntil('\n');
-  configFile.close();
-  StaticJsonBuffer<300> jsonBuffer;
-  JsonObject& json = jsonBuffer.parseObject(s);
-  PRINTDEBUG("Config File content");
-  PRINTDEBUG(s);
-  if (!json.success()) {
-    PRINTDEBUG("Failed to parse config file");
-    WIFI_Status = AP;
-    WiFi.mode(WIFI_AP);
-    return false;
-  }else{
-    if(json.containsKey("ap1") && json.containsKey("ap1_pwd")){  
-      strcpy(ap1, json["ap1"]);
-      strcpy(ap1_pwd, json["ap1_pwd"]);
-      PRINTDEBUG("Ap1 ");
-      //PRINTDEBUG(apl);
-      PRINTDEBUG(ap1);
-      PRINTDEBUG(ap1_pwd);
-    }
-    if(json.containsKey("ap2") && json.containsKey("ap2_pwd")){
-      strcpy(ap2, json["ap2"]);
-      strcpy(ap2_pwd, json["ap2_pwd"]);
-      PRINTDEBUG("Ap2 ");
-      PRINTDEBUG(ap2);
-      PRINTDEBUG(ap2_pwd);
-    }
-    if(json.containsKey("ap3") && json.containsKey("ap3_pwd")){
-      strcpy(ap2, json["ap3"]);
-      strcpy(ap2_pwd, json["ap3_pwd"]);
-      PRINTDEBUG("Ap3");
-      PRINTDEBUG(ap3);
-      PRINTDEBUG(ap3_pwd);
-    }
-      if(json.containsKey("ap4") && json.containsKey("ap4_pwd")){
-      strcpy(ap2, json["ap4"]);
-      strcpy(ap2_pwd, json["ap4_pwd"]);
-      PRINTDEBUG("Ap4 ");
-      PRINTDEBUG(ap4);
-      PRINTDEBUG(ap4_pwd);
-    }
-    WIFI_Status = STA;
-    WiFi.mode(WIFI_STA);
-  }
-}
-//Load Server Data
-bool load_server(){
-  File configFile = SPIFFS.open("/server.json", "r");
-  if (!configFile) {
-    PRINTDEBUG("Failed to open server file");
-    return false;
-  }
+  if (SPIFFS.begin()) {
+    PRINTDEBUGLN("mounted file system");
+    if (SPIFFS.exists("/config.json")) {
+      //file exists, reading and loading
+      PRINTDEBUGLN("reading config file");
+      File configFile = SPIFFS.open("/config.json", "r");
+      if (configFile) {
+        PRINTDEBUGLN("opened config file");
+        size_t size = configFile.size();
+        if (size > 1024) {
+          PRINTDEBUGLN("Config file size is too large");
+          return false;
+        }
+        // Allocate a buffer to store contents of the file.
+        std::unique_ptr<char[]> buf(new char[size]);
 
-  size_t size = configFile.size();
-  if (size > 1024) {
-    PRINTDEBUG("Config file size is too large");
+        configFile.readBytes(buf.get(), size);
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.parseObject(buf.get());
+        #if (DEBUG==1)  
+          json.printTo(Serial);
+        #endif
+        if (json.success()) {
+          PRINTDEBUGLN("\nparsed json");
+          strcpy(SSID, json["ssid"]);
+          strcpy(SSID_pwd, json["ssid_pwd"]);
+          PRINTDEBUGLN(SSID);
+          PRINTDEBUGLN(SSID_pwd);
+          if(json["update_server"]) 
+          strcpy(update_server, json["update_server"]);          
+          PRINTDEBUGLN(update_server);
+          if(json["update_server_page"]) 
+            strcpy(update_server_page, json["update_server_page"]);          
+          PRINTDEBUGLN(update_server_page);
+          //if(json["server"]) 
+          strcpy(server, json["server"]);
+          PRINTDEBUGLN(server);
+          if(json["server_page"])
+            strcpy(server_page, json["server_page"]);
+          PRINTDEBUGLN(server_page);
+          //if(json["server_port"]) 
+          //  strcpy(server_port, json["server_port"]);
+          //if(json["place"])
+          strcpy(PLACE, json["place"]);
+          PRINTDEBUGLN(PLACE);
+          if(json["ip"]) {
+            PRINTDEBUGLN("setting custom ip from config");
+            strcpy(static_ip, json["ip"]);
+            strcpy(static_gw, json["gateway"]);
+            strcpy(static_sn, json["subnet"]);
+            PRINTDEBUGLN(static_ip);
+/*            PRINTDEBUGLN("converting ip");
+            IPAddress ip = ipFromCharArray(static_ip);
+            PRINTDEBUGLN(ip);*/
+          } else {
+            PRINTDEBUGLN("no custom ip in config");
+            return false;
+          }
+        } else {
+          PRINTDEBUGLN("failed to load json config");
+          return false;
+        }
+      }
+    }else{
+      PRINTDEBUGLN("Files Doesn't exist");
+    }
+  } else {
+    PRINTDEBUGLN("failed to mount FS");
     return false;
   }
-  // Allocate a buffer to store contents of the file.
-  std::unique_ptr<char[]> buf(new char[size]);
-  String s=configFile.readStringUntil('\n');
-  configFile.close();
-  StaticJsonBuffer<300> jsonBuffer;
-  JsonObject& json = jsonBuffer.parseObject(s);
-  PRINTDEBUG("Server File content");
-  PRINTDEBUG(s);
-  if (!json.success()) {
-    PRINTDEBUG("Failed to parse Server file");
-    return false;
-  }else{
-    if(json.containsKey("host") ){  
-      strcpy(host, json["host"]);
-      PRINTDEBUG("Server ");
-      PRINTDEBUGLN( host);
-    }
-    if(json.containsKey("place") ){  
-      strcpy(PLACE, json["place"]);
-      PRINTDEBUG("Place ");
-      PRINTDEBUGLN(PLACE); 
-    }
-  }
+  //end read
+  PRINTDEBUGLN(static_ip);
+  PRINTDEBUGLN(static_gw);
+  PRINTDEBUGLN(static_sn);
+  return true;
 }
-
 /*************************************************************************************
  *  Pinging the server
  *************************************************************************************/
@@ -266,8 +225,8 @@ bool ping (String msg="ping"){
    // Use WiFiClientSecure class to create TLS connection
   WiFiClient client;
   PRINTDEBUG("Connecting to:");
-  PRINTDEBUG(host);
-  if(!client.connect(host, httpsPort))
+  PRINTDEBUG(server);
+  if(!client.connect(server, 80))
   {
     PRINTDEBUG("Connection failed");
     buzzing(2,300,200);
@@ -279,7 +238,7 @@ bool ping (String msg="ping"){
   PRINTDEBUG("Requesting URL:");
   PRINTDEBUG(url);
   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
+               "Host: " + server + "\r\n" +
                "User-Agent: 7elolLock\r\n" +
                "Connection: close\r\n\r\n");
   PRINTDEBUG("Request sent");
@@ -294,10 +253,10 @@ bool msg (String msgs ,String data){
   // Use WiFiClientSecure class to create TLS connection
   WiFiClient client;
   PRINTDEBUG("Connecting to:");
-  PRINTDEBUG(host);
+  PRINTDEBUG(server);
   //delay(10);
   // Check connection
-  if(!client.connect(host, httpsPort))
+  if(!client.connect(server, 80))
   {
     PRINTDEBUG("Connection failed");
     buzzing(4,300,200);
@@ -311,7 +270,7 @@ bool msg (String msgs ,String data){
   PRINTDEBUG("Requesting URL:");
   PRINTDEBUG(url);
   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
+               "Host: " + server + "\r\n" +
                "User-Agent: 7elolLock\r\n" +
                "Connection: close\r\n\r\n");
   PRINTDEBUG("Request sent");
@@ -354,17 +313,17 @@ bool msg (String msgs ,String data){
 void handleRoot(){
   PRINTDEBUG("Enter handleRoot");
   String header;
-  String wifi_conf = server.arg("wifi");
-  String server_conf = server.arg("server");
-  String master_conf = server.arg("master");
-  String action = server.arg("action");
-  String ids = server.arg("ID");
+  String wifi_conf = webServer.arg("wifi");
+  String server_conf = webServer.arg("server");
+  String master_conf = webServer.arg("master");
+  String action = webServer.arg("action");
+  String ids = webServer.arg("ID");
   int id = ids.toInt();
 
 
   if(action == String(PLACE) ){
     String content = "{\"" + String(PLACE) + "\":\"Opend\"}";
-    server.send(200, "text/html", content);
+    webServer.send(200, "text/html", content);
     PRINTDEBUG("Authorized Server");
     digitalWrite(INDICATOR, LOW);  // Turn the LED off by making the voltage LOW
     buzzing(1,400,20);
@@ -375,7 +334,7 @@ void handleRoot(){
     return;
   }else if(action == String("RESET")){
     String content = "{\"" + String(PLACE) + "\":\"Resitting Config\"}";
-    server.send(200, "text/html", content);
+    webServer.send(200, "text/html", content);
     buzzing(1,600,20);
     resetSelf();
     return;
@@ -388,17 +347,17 @@ void handleRoot(){
       enroll();
     }
     String content = "{\"" + String(PLACE) + "\":\"Adding\"}";
-    server.send(200, "text/html", content);
+    webServer.send(200, "text/html", content);
     return;
   }else if(action == String("DELETE")){
     if(id)
       deleteFingerprint(id);
     String content = "{\"" + String(PLACE) + "\":\"Deleting\"}";
-    server.send(200, "text/html", content);
+    webServer.send(200, "text/html", content);
     return;
   } else{
     String content = "{\"" + String(PLACE) + "\":\"Recived\"}";
-    server.send(200, "text/html", content);
+    webServer.send(200, "text/html", content);
   }
   if(wifi_conf){
     PRINTDEBUG(wifi_conf);
@@ -449,8 +408,8 @@ if(server_conf){
 /*************************************************************************************
  *  ////////////////////SETUP ////////////////
  *************************************************************************************/
-void setup()  
-{
+WiFiManager wifiManager;
+void setup() {
   pinMode(RELAY_PIN, OUTPUT);           // Initialize the RELAY_PIN pin as an output
   digitalWrite(RELAY_PIN, LOW);         // Turns Relay Off
   pinMode(BUZZER, OUTPUT);              // Initialize the Buzzer pin as an output
@@ -465,6 +424,8 @@ void setup()
     Serial.setDebugOutput(true);
     Serial.println();
     Serial.println("Author:: Mahmoud Shokry");
+    Serial.println("version:: 2.1");
+
   #endif
 
   PRINTDEBUGLN("Finger Print");
@@ -483,12 +444,74 @@ void setup()
   configTime(1 * 3600, 1 * 3600, "pool.ntp.org", "time.nist.gov");
   delay(500);
   buzzing(1,300,20);    
-  load_server();
+  //load_server();
   //SPIFFS.format();
   load_wifi();
   //Wifi connection
-  connectWifimul();
+  //connectWifimul();  
+  delay(100);
+  digitalWrite(INDICATOR, LOW);      // Turn the LED off by making the voltage HIGH
+  WiFiManagerParameter custom_update("update_server", "Update Server", update_server, 34);
+    WiFiManagerParameter custom_update_page("update_server_page", "Update Server route", update_server_page, 34);
+    WiFiManagerParameter custom_server("server", "Server name", server, 34);
+    WiFiManagerParameter custom_server_page("server_page", "Server route", server_page, 34);
+    WiFiManagerParameter custom_place("place", "Location Name", PLACE, 20);
+    
+    #if (DEBUG==1)
+    wifiManager.setDebugOutput(true);
+    #endif
+    #if (DEBUG==0)
+    wifiManager.setDebugOutput(false);
+    #endif
+    //set config save notify callback
+    wifiManager.setSaveConfigCallback(saveConfigCallback);
 
+    //add all your parameters here
+    wifiManager.addParameter(&custom_update);
+    wifiManager.addParameter(&custom_update_page);
+    wifiManager.addParameter(&custom_server);
+    wifiManager.addParameter(&custom_server_page);
+    wifiManager.addParameter(&custom_place);
+    //set minimu quality of signal so it ignores AP's under that quality
+    //defaults to 8% to reduce the power next
+    //wifiManager.setMinimumSignalQuality();
+    
+    wifiManager.setTimeout(280); // 14.7 min in seconds
+    wifiManager.autoConnect(SSID,SSID_pwd);
+    
+    strcpy(update_server, custom_update.getValue());
+    strcpy(update_server_page, custom_update_page.getValue());
+    strcpy(server, custom_server.getValue());
+    strcpy(server_page, custom_server_page.getValue());
+    strcpy(PLACE, custom_place.getValue());
+    //strcpy(SSID, wifiManager.getSSID());
+    //strcpy(SSID_pwd, wifiManager.getSSIDpwd());
+    //PRINTDEBUGLN(WiFiManager.getConfigPortalSSID())
+    if (shouldSaveConfig) {
+      PRINTDEBUGLN("saving config");
+      DynamicJsonBuffer jsonBuffer;
+      JsonObject& json = jsonBuffer.createObject();
+      json["server"] = server;
+      json["server_page"] = server_page;
+      json["update_server"] = update_server;
+      json["update_server_page"] = update_server_page;
+      json["place"] = PLACE;
+      json["ssid"] =  WiFi.SSID();
+      json["ssid_pwd"] =  WiFi.psk();
+      json["ip"] = WiFi.localIP().toString();
+      json["gateway"] = WiFi.gatewayIP().toString();
+      json["subnet"] = WiFi.subnetMask().toString();
+      File configFile = SPIFFS.open("/config.json", "w");
+      if (!configFile) {
+        PRINTDEBUGLN("failed to open config file for writing");
+      }
+      #if (DEBUG==1)
+        json.prettyPrintTo(Serial);
+      #endif
+      json.printTo(configFile);
+      configFile.close();
+    }
+  delay(10);
 
   if (finger.begin(&mySerial)) {
     PRINTDEBUGLN("Found fingerprint sensor!");
@@ -507,28 +530,19 @@ void setup()
   else
     PRINTDEBUGLN("Unknown error!");
   
-  delay(100);
-  digitalWrite(INDICATOR, LOW);      // Turn the LED off by making the voltage HIGH
-  if(WIFI_Status == STA)
-    if (wifiMulti.run() != WL_CONNECTED ){
-      buzzing(3,300,200);
-    }
-  delay(10);
-  
-  server.on("/", handleRoot);
-  server.begin();
-  if (WIFI_Status == STA){
+  webServer.on("/", handleRoot);
+  webServer.begin();
+  if (true) /*WIFI_Status == STA*/
+  {
     ping();
     update();
   }
   previousMillis = millis();
-
-
 }
 
 void loop()                     // run over and over again
 {
-    int connectFails = 0;
+  int connectFails = 0;
   uint32_t currentMillis = millis();
   if (currentMillis - previousMillis >= interval && unlocked) {
     digitalWrite(RELAY_PIN, LOW);
@@ -537,13 +551,14 @@ void loop()                     // run over and over again
   }
 
     //WiFi check
-  if(WIFI_Status == STA){
+  if(/*WIFI_Status == STA*/1)
+  {
     if(currentMillis - previousMillis >= (interval*10)){
-      while(wifiMulti.run() != WL_CONNECTED)
+      while(!wifiManager.autoConnect(SSID, SSID_pwd))
       {
         digitalWrite(INDICATOR, HIGH);      // Turn the LED off by making the voltage HIGH
         //connectWifi(ssid, password);          // Try to connect WiFi for 30 seconds
-        connectWifimul();
+        //connectWifimul();
         digitalWrite(INDICATOR, LOW);      // Turn the LED off by making the voltage HIGH
         connectFails++;
         buzzing(3,300,200);
@@ -553,7 +568,7 @@ void loop()                     // run over and over again
       }
      }
      }
-  server.handleClient();
+  webServer.handleClient();
 
   getFingerprintID();
   delay(50);            //don't ned to run this at full speed.
